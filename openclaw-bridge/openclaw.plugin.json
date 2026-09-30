@@ -1,0 +1,15 @@
+{
+  "id": "life-bridge",
+  "name": "Life Assistant bridge",
+  "description": "Scoped notes and knowledge tools with explicit journal receipts",
+  "contracts": {"tools": ["life_search", "life_note"]},
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["endpoint", "token"],
+    "properties": {
+      "endpoint": {"type": "string"},
+      "token": {"type": "string"}
+    }
+  }
+}

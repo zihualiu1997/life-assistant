@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools==82.0.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "life-assistant"
+version = "0.1.0"
+description = "Self-hosted personal life assistant"
+requires-python = ">=3.12"
+dependencies = ["fastapi==0.141.1", "uvicorn==0.54.0", "tzdata==2026.4", "segno==1.6.6"]
+
+[project.scripts]
+life = "life_app.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "server"}
+py-modules = ["life_assistant", "openweather_sync"]
+
+[tool.setuptools.packages.find]
+where = ["server"]
+
+[tool.setuptools.package-data]
+life_app = ["static/*"]
+life_service = ["prompts/*.txt"]

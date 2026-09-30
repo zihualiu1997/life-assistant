@@ -1,0 +1,88 @@
+name: Validate and build
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  server:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements.lock
+      - run: python -m pip install . httpx==0.28.1
+      - run: python -m unittest discover -s tests -v
+      - run: python scripts/privacy_scan.py .
+      - run: python scripts/build_release.py
+      - if: runner.os == 'Linux'
+        run: bash -n install.sh scripts/life-admin
+      - if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: server
+          path: dist/*
+  desktop:
+    runs-on: windows-latest
+    env:
+      RUSTFLAGS: --remap-path-prefix=C:\Users\runneradmin=BUILD_USER
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.19.0'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '11.19.0'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: node --test ../openclaw-bridge/test.mjs
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - run: python ../scripts/collect_licenses.py
+      - run: pnpm tauri build
+      - name: Scan executable, installer and unpacked installer contents
+        shell: pwsh
+        run: |
+          python ../scripts/privacy_scan.py src-tauri/target/release/life-assistant-desktop.exe
+          $installer = Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe | Select-Object -First 1
+          python ../scripts/privacy_scan.py $installer.FullName
+          & 'C:/Program Files/7-Zip/7z.exe' x $installer.FullName '-ounpacked' -y
+          if ($LASTEXITCODE -ne 0) { throw 'Installer extraction failed' }
+          python ../scripts/privacy_scan.py unpacked
+          if ($LASTEXITCODE -ne 0) { throw 'Installer scan failed' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: desktop/src-tauri/target/release/bundle/nsis/*.exe
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [server, desktop]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - run: cd release && sha256sum *.exe *.tar.gz > SHA256SUMS
+      - name: Create draft prerelease for real acceptance checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release create "$GITHUB_REF_NAME" release/* --draft --prerelease --title "$GITHUB_REF_NAME" --notes '预发布构建。自动测试不代表 Linux 全新安装、微信、供应商、SMTP 收件箱和 Windows 安装验收；请先核对 docs/validation.md。'

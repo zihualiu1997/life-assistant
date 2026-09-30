@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $EUID == 0 ]] || { echo 'Run with sudo'; exit 1; }
+export LIFE_DATA_DIR=/var/lib/life-assistant
+case "${1:-status}" in
+  status) sudo -u life-assistant /opt/life-assistant/current/venv/bin/life status; systemctl --no-pager status life-app life-gateway caddy || true ;;
+  bootstrap) sudo -u life-assistant /opt/life-assistant/current/venv/bin/life bootstrap ;;
+  backup)
+    [[ $# == 2 ]] || { echo 'Usage: life-admin backup /absolute/private/backup.tar.gz'; exit 1; }
+    systemctl stop life-app life-gateway
+    trap 'systemctl start life-app; if [[ -f /var/lib/life-assistant/.secrets/openclaw.json ]]; then systemctl start life-gateway; fi' EXIT
+    /opt/life-assistant/current/venv/bin/life backup "$2" ;;
+  rollback)
+    [[ -L /opt/life-assistant/previous ]] || { echo 'No previous release'; exit 1; }
+    systemctl stop life-app life-gateway
+    ln -sfn "$(readlink -f /opt/life-assistant/previous)" /opt/life-assistant/current
+    systemctl start life-app
+    [[ ! -f /var/lib/life-assistant/.secrets/openclaw.json ]] || systemctl start life-gateway ;;
+  uninstall)
+    systemctl disable --now life-app life-gateway
+    rm -f /etc/systemd/system/life-app.service /etc/systemd/system/life-gateway.service /etc/sudoers.d/life-assistant
+    if grep -q '^# Managed by life-assistant$' /etc/caddy/Caddyfile; then
+      systemctl stop caddy
+      mv /etc/caddy/Caddyfile /etc/caddy/Caddyfile.life-assistant-disabled
+    fi
+    systemctl daemon-reload
+    echo 'Services removed. Data, backups and releases retained. Caddy package retained.' ;;
+  *) echo 'Commands: status, bootstrap, backup FILE, rollback, uninstall'; exit 1 ;;
+esac

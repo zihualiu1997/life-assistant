@@ -1,0 +1,9 @@
+{
+  "name": "life-assistant-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "openclaw": "2026.9.5",
+    "@tencent-weixin/openclaw-weixin": "2.4.9"
+  }
+}
