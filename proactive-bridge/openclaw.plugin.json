@@ -1,0 +1,15 @@
+{
+  "id": "life-proactive",
+  "name": "Life proactive check-ins",
+  "description": "Owner-only inbound evidence and project-owned check-in timer",
+  "activation": {"onStartup": true},
+  "contracts": {"tools": ["life_checkin_record", "life_followup_manage", "life_preferences", "life_knowledge_manage", "life_profile_manage"]},
+  "configSchema": {
+    "type": "object", "additionalProperties": false,
+    "required": ["python", "entrypoint", "config", "accountId", "ownerId"],
+    "properties": {
+      "python": {"type":"string"}, "entrypoint": {"type":"string"},
+      "config": {"type":"string"}, "accountId": {"type":"string"}, "ownerId": {"type":"string"}
+    }
+  }
+}

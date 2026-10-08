@@ -6,6 +6,7 @@
 - Python 日记、邮件与简报模块：从所有者现有生活助手提取并通用化。
 - OpenClaw：MIT；安装器从 npm 获取独立组件，保留其包内许可证。
 - 腾讯 `@tencent-weixin/openclaw-weixin`：MIT；安装器安装独立组件，保留其包内许可证。
+- `silk-wasm` 3.7.1：MIT；微信原始语音编解码依赖，固定版本与 npm SHA512，保留包内许可证。
 - Tauri：MIT / Apache-2.0；Rust 和 npm 依赖许可证以锁文件所对应包的 LICENSE 为准。
 - Caddy：Apache-2.0；通过系统软件包安装，不随源码重新授权。
 

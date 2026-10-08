@@ -68,8 +68,10 @@ class Runner:
             try:
                 mail.check_mail(c, kind)
                 endpoint(c)
-                secret(c, c["model"]["secret"])
-                secret(c, c["mail"]["secret"])
+                from life_app import managed
+                if not managed.enabled():
+                    secret(c, c["model"]["secret"])
+                    secret(c, c["mail"]["secret"])
                 if not c["approved"]["model_context"]:
                     raise ServiceError("model_context_not_approved")
                 if kind == "morning":

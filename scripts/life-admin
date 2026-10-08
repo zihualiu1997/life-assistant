@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 [[ $EUID == 0 ]] || { echo 'Run with sudo'; exit 1; }
+if [[ ${1:-} == pilot ]]; then
+  shift
+  [[ -x /opt/life-pilot/venv/bin/life-fleet ]] || { echo 'Install the independent pilot runtime first'; exit 1; }
+  exec /opt/life-pilot/venv/bin/life-fleet --root /var/lib/life-pilot "$@"
+fi
 export LIFE_DATA_DIR=/var/lib/life-assistant
 case "${1:-status}" in
   status) sudo -u life-assistant /opt/life-assistant/current/venv/bin/life status; systemctl --no-pager status life-app life-gateway caddy || true ;;

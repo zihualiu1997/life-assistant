@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -16,6 +17,8 @@ from life_assistant import atomic_write, journal, lock
 from life_service.core import ServiceError
 from .config import service_config, settings
 from .store import digest
+from .memory import Memories, no_save, preferences
+from . import managed
 
 
 def configuration_locked(fn):
@@ -49,9 +52,9 @@ def request_json(url, payload=None, headers=None, timeout=60):
 @configuration_locked
 def model_text(store, system, text):
     s = settings(store)
-    if not store.secret("model") or not s.model:
+    if not managed.enabled() and (not store.secret("model") or not s.model):
         raise ServiceError("model_not_configured")
-    raw = request_json(s.base_url + "/chat/completions", {"model": s.model, "messages": [{"role": "system", "content": system}, {"role": "user", "content": text}], "stream": False}, {"Authorization": "Bearer " + store.secret("model")})
+    raw = managed.model_request(store, {"model": s.model, "messages": [{"role": "system", "content": system}, {"role": "user", "content": text}], "stream": False}, "memory")
     try:
         choice = raw["choices"][0]
         result = choice["message"]["content"]
@@ -71,7 +74,7 @@ def test_model(store):
     headers = {"Authorization": "Bearer " + store.secret("model")}
     messages = [{"role": "user", "content": "Call life_probe with value fixture. This is a fictional tool test."}]
     tool = {"type": "function", "function": {"name": "life_probe", "description": "Harmless fictional echo test", "parameters": {"type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"], "additionalProperties": False}}}
-    raw = request_json(s.base_url + "/chat/completions", {"model": s.model, "messages": messages, "tools": [tool], "tool_choice": {"type": "function", "function": {"name": "life_probe"}}, "stream": False}, headers)
+    raw = managed.model_request(store, {"model": s.model, "messages": messages, "tools": [tool], "tool_choice": {"type": "function", "function": {"name": "life_probe"}}, "stream": False}, "test")
     try:
         message = raw["choices"][0]["message"]
         calls = message["tool_calls"]
@@ -79,7 +82,7 @@ def test_model(store):
         messages.extend([{"role": "assistant", "content": message.get("content"), "tool_calls": calls}, {"role": "tool", "tool_call_id": calls[0]["id"], "content": '{"value":"fixture","status":"ok"}'}])
         # Preserve optional reasoning metadata required by some compatible providers.
         if "reasoning_content" in message: messages[-2]["reasoning_content"] = message["reasoning_content"]
-        result = request_json(s.base_url + "/chat/completions", {"model": s.model, "messages": messages, "stream": False}, headers)
+        result = managed.model_request(store, {"model": s.model, "messages": messages, "stream": False}, "test")
         if not result["choices"][0]["message"]["content"]: raise ValueError()
     except (KeyError, IndexError, TypeError, ValueError):
         raise ServiceError("model_tool_call_incompatible") from None
@@ -91,12 +94,14 @@ def search(store, query):
     items = []
     for name in store.notes():
         if not name.startswith(("04_知识与资源/", "02_生活领域/", "03_目标与项目/")): continue
+        if store.get("preferences") is not None and name.startswith(("04_知识与资源/问答记录/", "04_知识与资源/主题知识/")):
+            continue  # Historical extractions are not current facts after memory corrections.
         path = store.note(name)
         if path.stat().st_size > 200_000: continue
         text = path.read_text(encoding="utf-8")
         score = sum(text.lower().count(term) for term in terms)
         if score: items.append((score, name, text[:1500]))
-    return [{"source": n, "text": t} for _, n, t in sorted(items, reverse=True)[:2]]
+    return (Memories(store).search(query) + [{"source": n, "text": t} for _, n, t in sorted(items, reverse=True)[:2]])[:4]
 
 @configuration_locked
 def chat(store, owner, conversation, message_id, body):
@@ -113,7 +118,7 @@ def chat(store, owner, conversation, message_id, body):
         try:
             # Explicit record intent is deterministic and never relies on a model to claim success.
             match = re.match(r"^(?:记一下[\s:：]*|日记\s*[:：]\s*)(.+)$", body, re.S)
-            if match:
+            if match and not no_save(body):
                 day = dt.datetime.now(ZoneInfo(s.timezone)).date().isoformat()
                 result = journal(store.root, day, "desktop", owner + ":" + message_id, match[1], ZoneInfo(s.timezone))
                 reply = "已记录。来源：" + Path(result["path"]).relative_to(store.root).as_posix()
@@ -136,6 +141,26 @@ def archive_pending(store):
         count = 0
         for row in rows:
             key = row["id"]
+            if no_save(row["body"]):
+                with store.db() as db: db.execute("UPDATE messages SET archived=1 WHERE id=?", (key,))
+                continue
+            if store.get("preferences") is not None:
+                pref = preferences(store)
+                if not pref.cloud_processing or not pref.automatic_memory or pref.paused:
+                    return {"status": "disabled"}
+                result = model_text(store, '仅从用户原文选择明确自述的稳定事实。问题、假设、示例、转发、模型建议不选。不能改写原文。返回 JSON 对象 {"quotes":["逐字原话"]}，最多五项；没有事实返回空数组。', row["body"])
+                try:
+                    quotes = json.loads(result)["quotes"]
+                    if not isinstance(quotes, list) or len(quotes) > 5: raise ValueError()
+                    for quote in quotes:
+                        if not isinstance(quote, str) or not quote.strip() or quote not in row["body"]: raise ValueError()
+                        if re.search(r"[?？]|假如|如果|例如|比如|转发|测试|虚构", quote): continue
+                        kind = "user_text" if row["owner"] != "wechat" else store.get("source-kind:" + key, "unclassified")
+                        Memories(store).extract(key, quote, quote, kind)
+                except (ValueError, KeyError, TypeError): raise ServiceError("memory_extraction_invalid") from None
+                with store.db() as db: db.execute("UPDATE messages SET archived=1 WHERE id=?", (key,))
+                count += 1
+                continue
             # Per-message files make replay safe and keep original sources unmodified.
             name = "04_知识与资源/问答记录/" + key + ".md"
             path = store.note(name)
@@ -169,9 +194,36 @@ def write_gateway(store):
     wechat_plugin = os.environ.get("LIFE_WECHAT_PLUGIN_DIR", "/opt/life-assistant/current/gateway/node_modules/@tencent-weixin/openclaw-weixin")
     config = {"gateway": {"mode": "local", "bind": "loopback", "port": 18789, "auth": {"mode": "token", "token": store.secret("gateway")}, "http": {"endpoints": {"chatCompletions": {"enabled": True}}}},
               "models": {"mode": "merge", "providers": {"life": {"baseUrl": s.base_url, "apiKey": store.secret("model"), "api": "openai-completions", "models": [{"id": s.model, "name": s.model}]}}},
-              "agents": {"defaults": {"workspace": str(workspace), "model": {"primary": "life/" + s.model}, "heartbeat": {"every": "0m"}}},
+              "agents": {"defaults": {"workspace": str(workspace), "model": {"primary": "life/" + s.model}, "heartbeat": {"every": "0m"}},
+                         "entries": {"main": {"agentDir": str(workspace)}}},
               "tools": {"allow": ["life_search", "life_note"]},
               "plugins": {"allow": ["openclaw-weixin", "life-bridge"], "load": {"paths": [plugin, wechat_plugin]}, "entries": {"openclaw-weixin": {"enabled": True}, "life-bridge": {"enabled": True, "hooks": {"allowConversationAccess": True}, "config": {"endpoint": "http://127.0.0.1:18932", "token": store.secret("bridge")}}}}}
+    if managed.enabled():
+        # Only the product's consent-gated, correctable memory pipeline may run.
+        config["plugins"]["slots"] = {"memory": "none"}
+        operator = managed.connection()
+        provider = config["models"]["providers"]["life"]
+        provider["request"] = {"allowPrivateNetwork": True}
+        provider.update(baseUrl=operator["broker_url"], apiKey=operator["token"], models=[{"id": operator["model"], "name": operator["model"], "input": ["text", "image"], "reasoning": False}])
+        config["agents"]["defaults"]["model"]["primary"] = "life/" + operator["model"]
+    config.setdefault("channels", {})["openclaw-weixin"] = {"inboundBatching": {"textMs": 3000, "mediaMs": 20000}, "replyProgressMessages": False}
+    if os.environ.get("LIFE_CONTAINER") == "1" and store.get("wechat_owner"):
+        from life_proactive import __file__ as proactive_file
+        module = Path(proactive_file).parent
+        proactive = json.loads((module / "config.example.json").read_text(encoding="utf-8"))
+        accounts = json.loads((root / "openclaw-weixin/accounts.json").read_text(encoding="utf-8"))
+        config["plugins"]["entries"]["life-bridge"]["config"].update(accountId=accounts[0], ownerId=store.get("wechat_owner"))
+        proactive.update(workspace="..", managed=True, account_id=accounts[0], owner_id=store.get("wechat_owner"), timezone=s.timezone)
+        proactive_path = store.state / "proactive.json"
+        atomic_write(proactive_path, json.dumps(proactive, ensure_ascii=False))
+        service_config(store)
+        plugin_dir = os.environ.get("LIFE_PROACTIVE_BRIDGE_DIR", "/opt/life/proactive-bridge")
+        config["plugins"]["allow"].append("life-proactive")
+        config["plugins"]["load"]["paths"].append(plugin_dir)
+        config["plugins"]["entries"]["life-proactive"] = {"enabled": True, "hooks": {"allowConversationAccess": True, "allowPromptInjection": True}, "config": {
+            "python": sys.executable, "entrypoint": str(module / "entrypoint.py"), "config": str(proactive_path),
+            "accountId": accounts[0], "ownerId": store.get("wechat_owner")}}
+        config["tools"]["allow"].extend(["life_checkin_record", "life_followup_manage", "life_preferences", "life_knowledge_manage", "life_profile_manage"])
     path = store.secrets / "openclaw.json"
     atomic_write(path, json.dumps(config, ensure_ascii=False, indent=2))
     if os.name != "nt": path.chmod(0o600)
@@ -188,7 +240,7 @@ class WechatLogin:
         with self.guard:
             if self.process is not None and self.process.poll() is None: return self.status
             if not settings(self.store).model_context_approved: raise ServiceError("model_context_not_approved")
-            if not settings(self.store).model: raise ServiceError("model_not_configured")
+            if not managed.enabled() and not settings(self.store).model: raise ServiceError("model_not_configured")
             write_gateway(self.store)
             command = os.environ.get("LIFE_OPENCLAW_BIN", "openclaw")
             try:
@@ -231,6 +283,10 @@ def restart_gateway(store):
     if not settings(store).model_context_approved: raise ServiceError("model_context_not_approved")
     verify_wechat_owner(store)
     write_gateway(store)
+    if os.environ.get("LIFE_CONTAINER") == "1":
+        store.put("gateway_enabled", True)
+        atomic_write(store.state / "gateway-restart", "requested\n")
+        return
     try:
         result = subprocess.run(["sudo", "-n", "/usr/bin/systemctl", "restart", "life-gateway.service"], timeout=30, capture_output=True)
         if result.returncode: raise ValueError()

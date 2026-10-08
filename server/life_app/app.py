@@ -25,6 +25,8 @@ from life_service.core import ServiceError
 from .config import PROVIDERS, Settings, service_config, settings
 from .store import Store, digest
 from . import integrations as integration
+from .memory import Memories, Preferences, preferences, no_save
+from . import managed
 
 class Input(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -62,18 +64,28 @@ class Enable(Input):
     mail_received: bool
     previews_approved: bool
 
+class MemoryCorrection(Input):
+    revision: int = Field(ge=1)
+    text: str = Field(default="", max_length=4000)
+    forget: bool = False
+
+class EmailVerification(Input):
+    email: str = Field(default="", max_length=254)
+    code: str = Field(default="", max_length=6)
+
 def password_hash(password, salt):
     return hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), 600000).hex()
 
 def create_app(root=None, background=True, secure=True):
     store = Store(root or os.environ.get("LIFE_DATA_DIR", "data"))
+    cookie_name = "__Host-life_session" if secure and managed.enabled() else "life_session"
     login_flow = integration.WechatLogin(store)
     stop = threading.Event()
 
     @contextlib.asynccontextmanager
     async def lifespan(app):
         thread = None
-        if background:
+        if background and os.environ.get("LIFE_MAINTENANCE") != "1":
             thread = threading.Thread(target=integration.scheduler, args=(store, stop), daemon=True)
             thread.start()
         yield
@@ -83,6 +95,7 @@ def create_app(root=None, background=True, secure=True):
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.store = store
+    memories = Memories(store)
 
     def configured(fn):
         @wraps(fn)
@@ -93,6 +106,8 @@ def create_app(root=None, background=True, secure=True):
 
     @app.middleware("http")
     async def guard(request, call_next):
+        if os.environ.get("LIFE_MAINTENANCE") == "1" and request.url.path != "/health/ready":
+            return JSONResponse({"detail": "maintenance"}, 503)
         expected = os.environ.get("LIFE_PUBLIC_ORIGIN", "")
         if request.method in {"POST", "PUT", "DELETE"}:
             origin = request.headers.get("origin")
@@ -135,7 +150,7 @@ def create_app(root=None, background=True, secure=True):
             return row["owner"]
 
     def admin(request: Request):
-        token = request.cookies.get("life_session", "")
+        token = request.cookies.get(cookie_name, "")
         owner = token_owner(token, "admin")
         if request.method not in {"GET", "HEAD"} and not hmac.compare_digest(request.headers.get("x-csrf-token", ""), digest(token + ":csrf")):
             raise HTTPException(403, "csrf_required")
@@ -153,11 +168,16 @@ def create_app(root=None, background=True, secure=True):
     def issue_session(response):
         token = secrets.token_urlsafe(32)
         with store.db() as db: db.execute("INSERT INTO tokens VALUES (?,?,?,?)", (digest(token), "admin", "admin", time.time() + 43200))
-        response.set_cookie("life_session", token, httponly=True, secure=secure, samesite="strict", max_age=43200, path="/")
+        response.set_cookie(cookie_name, token, httponly=True, secure=secure, samesite="strict", max_age=43200, path="/")
         return {"csrf": digest(token + ":csrf")}
 
     @app.get("/api/bootstrap")
     def bootstrap_status(): return {"initialized": bool(store.get("admin"))}
+
+    @app.get("/health/ready")
+    def ready():
+        with store.db() as db: db.execute("SELECT count(*) FROM kv").fetchone()
+        return {"ready": True, "data_format": 1, "maintenance": os.environ.get("LIFE_MAINTENANCE") == "1"}
 
     @app.post("/api/bootstrap")
     def bootstrap(value: Login, request: Request, response: Response):
@@ -182,23 +202,76 @@ def create_app(root=None, background=True, secure=True):
 
     @app.get("/api/session")
     def session(request: Request, owner=Depends(admin)):
-        return {"csrf": digest(request.cookies["life_session"] + ":csrf")}
+        return {"csrf": digest(request.cookies[cookie_name] + ":csrf")}
 
     @app.post("/api/logout")
     def logout(request: Request, response: Response, owner=Depends(admin)):
-        with store.db() as db: db.execute("DELETE FROM tokens WHERE hash=?", (digest(request.cookies["life_session"]),))
-        response.delete_cookie("life_session", path="/")
+        with store.db() as db: db.execute("DELETE FROM tokens WHERE hash=?", (digest(request.cookies[cookie_name]),))
+        response.delete_cookie(cookie_name, path="/", secure=secure, httponly=True, samesite="strict")
         return {"status": "ok"}
 
     @app.get("/api/settings")
     def get_settings(owner=Depends(admin)):
+        if managed.enabled():
+            values = settings(store).model_dump()
+            return {"managed": True, "settings": {key: values[key] for key in ("display_name", "timezone", "morning", "evening", "enabled")}}
         return {"settings": settings(store).model_dump(), "providers": PROVIDERS, "secrets": {k: bool(store.secret(k)) for k in ("model", "smtp", "weather")}, "checks": store.get("checks", {})}
+
+    @app.get("/api/usage")
+    def user_usage(owner=Depends(admin)):
+        return managed.call("usage")
+
+    @app.post("/api/email/{action}")
+    def user_email(action: str, value: EmailVerification, owner=Depends(admin)):
+        if action not in {"request-verification", "verify"}: raise HTTPException(404)
+        result = managed.call("mail/" + action, {"email": value.email} if action == "request-verification" else {"code": value.code})
+        if action == "request-verification":
+            store.put("email_pending", value.email)
+            store.put("email_verified", False)
+        else:
+            store.put("email_verified", True)
+            store.put("verified_email", store.get("email_pending"))
+        return result
+
+    @app.get("/api/preferences")
+    def get_preferences(owner=Depends(admin)):
+        return preferences(store).model_dump()
+
+    @app.put("/api/preferences")
+    def save_preferences(value: Preferences, owner=Depends(admin)):
+        with lock(store.root, "settings"):
+            store.put("preferences", value.model_dump())
+            s = settings(store)
+            s.timezone = value.timezone
+            s.display_name, s.morning, s.evening = value.display_name, value.morning, value.evening
+            s.model_context_approved = value.cloud_processing
+            s.archive_enabled = value.cloud_processing and value.automatic_memory and not value.paused
+            if value.paused or not value.cloud_processing: s.enabled = False
+            if not value.cloud_processing:
+                store.put("gateway_enabled", False)
+            store.put("settings", s.model_dump())
+            store.put("checks", {})
+        return {"status": "saved"}
+
+    @app.get("/api/memories")
+    def memory_list(owner=Depends(admin)):
+        return {"items": memories.items()}
+
+    @app.put("/api/memories/{key}")
+    def memory_correct(key: str, value: MemoryCorrection, owner=Depends(admin)):
+        try: return memories.correct(key, value.revision, value.text, value.forget)
+        except ValueError: raise HTTPException(409, "memory_changed_reload_first")
 
     @app.put("/api/settings")
     def save_settings(value: Setup, owner=Depends(admin)):
+        if managed.enabled(): raise HTTPException(403, "operator_managed_settings")
         with lock(store.root, "settings"):
             before = integration.fingerprint(store)
             value.settings.enabled = False  # Activation is a separate, checked operation.
+            if store.get("preferences") is not None:
+                pref = preferences(store)
+                value.settings.model_context_approved = pref.cloud_processing
+                value.settings.archive_enabled = pref.cloud_processing and pref.automatic_memory and not pref.paused
             store.put("settings", value.settings.model_dump())
             for name, credential in (("model", value.model_key), ("smtp", value.smtp_password), ("weather", value.weather_key)):
                 if credential: store.secret(name, credential)
@@ -252,8 +325,12 @@ def create_app(root=None, background=True, secure=True):
     @app.post("/api/activate")
     @configured
     def activate(value: Enable, owner=Depends(admin)):
+        if store.get("preferences") is not None and preferences(store).paused:
+            raise HTTPException(409, "resume_before_activation")
         checks = store.get("checks", {})
-        if not value.mail_received or not value.previews_approved or any(checks.get(k) != integration.fingerprint(store) for k in ("model", "mail", "weather", "morning", "evening")):
+        required = ["model", "mail", "morning", "evening"]
+        if service_config(store)["weather"]["enabled"]: required.append("weather")
+        if not value.mail_received or not value.previews_approved or any(checks.get(k) != integration.fingerprint(store) for k in required):
             raise HTTPException(409, "complete_tests_and_previews_first")
         s = settings(store)
         s.enabled = True
@@ -288,6 +365,7 @@ def create_app(root=None, background=True, secure=True):
 
     @app.post("/api/pairing")
     def create_pair(owner=Depends(admin)):
+        if managed.enabled(): raise HTTPException(404)
         code = secrets.token_urlsafe(18)
         with store.db() as db: db.execute("INSERT INTO tokens VALUES (?,?,?,?)", (digest(code), "pair", "", time.time() + 600))
         return {"code": code, "expires_in": 600}
@@ -319,6 +397,7 @@ def create_app(root=None, background=True, secure=True):
     @app.post("/v1/journal")
     def record(value: Record, owner=Depends(either)):
         if str(UUID(value.message_id)) != value.message_id: raise ValueError()
+        if no_save(value.body): return {"status": "not_saved"}
         try: result = journal(store.root, value.date, "desktop", owner + ":" + value.message_id, value.body, ZoneInfo(settings(store).timezone))
         except ValueError as e:
             if str(e) == "message_id_conflict": raise HTTPException(409, "message_id_conflict")
@@ -386,6 +465,21 @@ def create_app(root=None, background=True, secure=True):
                 total += path.stat().st_size
                 if total > 50_000_000: raise HTTPException(413, "use_server_backup")
                 archive.write(path, name)
+            personal = settings(store).model_dump(include={"display_name", "timezone", "morning", "evening", "capture", "enabled", "archive_enabled", "model_context_approved"})
+            exports = {"个人设置.json": personal, "隐私偏好.json": preferences(store).model_dump(), "记忆.json": memories.items()}
+            with store.db() as db:
+                exports["对话记录.json"] = [dict(row) for row in db.execute("SELECT conversation,body,reply,status,created FROM messages ORDER BY created")]
+            for name, value in exports.items():
+                encoded = json.dumps(value, ensure_ascii=False, indent=2).encode("utf-8")
+                total += len(encoded)
+                if total > 50_000_000: raise HTTPException(413, "use_server_backup")
+                archive.writestr(name, encoded)
+            for path in (store.root / "01_日常记录").glob("????/附件/**/*"):
+                if not path.is_file(): continue
+                if path.is_symlink() or not path.resolve().is_relative_to(store.root / "01_日常记录"): raise HTTPException(400, "unsafe_attachment")
+                total += path.stat().st_size
+                if total > 50_000_000: raise HTTPException(413, "use_server_backup")
+                archive.write(path, path.relative_to(store.root).as_posix())
         return Response(buffer.getvalue(), media_type="application/zip", headers={"Content-Disposition": 'attachment; filename="life-notes.zip"'})
 
     @app.post("/api/import")
@@ -417,8 +511,12 @@ def create_app(root=None, background=True, secure=True):
         if request.client and request.client.host not in {"127.0.0.1", "::1", "testclient"}: raise HTTPException(403)
         expected = "Bearer " + store.secret("bridge")
         if not store.secret("bridge") or not hmac.compare_digest(request.headers.get("authorization", ""), expected): raise HTTPException(401)
+        if action == "transcribe":
+            from .audio import transcribe
+            return transcribe(store, str(value.get("path", "")))
         if action == "search": return {"items": integration.search(store, str(value.get("query", ""))[:6000])}
         if action == "journal":
+            if no_save(str(value.get("body", ""))): return {"status": "not_saved"}
             timezone = ZoneInfo(settings(store).timezone)
             day = value.get("date") or dt.datetime.now(timezone).date().isoformat()
             result = journal(store.root, day, "wechat", value["message_id"], value["body"], timezone)
@@ -431,7 +529,18 @@ def create_app(root=None, background=True, secure=True):
             body, reply = str(value.get("body", ""))[:6000], str(value.get("reply", ""))[:12000]
             if not body or not value.get("message_id"): raise HTTPException(400)
             key = digest("wechat:" + str(value["message_id"]))
-            with store.db() as db: db.execute("INSERT OR IGNORE INTO messages(id,owner,conversation,body,reply,status,created) VALUES (?,?,?,?,?,?,?)", (key, "wechat", str(value.get("conversation", "wechat")), body, reply, "completed", time.time()))
+            kind = value.get("source_kind", "unclassified")
+            if kind not in ("user_text", "voice_transcript", "image_interpretation", "unclassified"):
+                raise HTTPException(400, "invalid_source_kind")
+            conversation = str(value.get("conversation", "wechat"))
+            with store.db() as db:
+                old = db.execute("SELECT body,conversation FROM messages WHERE id=?", (key,)).fetchone()
+                if old and (old["body"] != body or old["conversation"] != conversation):
+                    raise HTTPException(409, "capture_id_conflict")
+                if not old:
+                    db.execute("INSERT INTO messages(id,owner,conversation,body,reply,status,created) VALUES (?,?,?,?,?,?,?)", (key, "wechat", conversation, body, reply, "completed", time.time()))
+                    db.execute("INSERT INTO kv VALUES (?,?)", ("source-kind:" + key, json.dumps(kind)))
+                    db.execute("INSERT INTO kv VALUES (?,?)", ("source-message:" + key, json.dumps(str(value["message_id"]))))
             return {"status": "accepted"}
         raise HTTPException(404)
 
@@ -439,6 +548,9 @@ def create_app(root=None, background=True, secure=True):
     app.mount("/static", StaticFiles(directory=static), name="static")
 
     @app.get("/")
-    def home(): return FileResponse(static / "index.html")
+    def home(): return FileResponse(static / ("pilot.html" if managed.enabled() else "index.html"))
+
+    @app.get("/memory")
+    def memory_page(): return FileResponse(static / "memory.html")
 
     return app

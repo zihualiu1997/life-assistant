@@ -52,6 +52,7 @@ def main():
     subs.add_parser("gateway-check")
     serve = subs.add_parser("serve")
     serve.add_argument("--port", type=int, default=18932)
+    serve.add_argument("--host", default="127.0.0.1", choices=["127.0.0.1", "0.0.0.0"])
     serve.add_argument("--insecure-local", action="store_true")
     back = subs.add_parser("backup")
     back.add_argument("file")
@@ -84,6 +85,8 @@ def main():
         import uvicorn
         from .app import create_app
         os.umask(0o077)
-        uvicorn.run(create_app(args.data, secure=not args.insecure_local), host="127.0.0.1", port=args.port, access_log=False, log_level="critical", proxy_headers=True, forwarded_allow_ips="127.0.0.1")
+        if args.host != "127.0.0.1" and os.environ.get("LIFE_CONTAINER") != "1":
+            raise SystemExit("non_loopback_requires_container_runtime")
+        uvicorn.run(create_app(args.data, secure=not args.insecure_local), host=args.host, port=args.port, access_log=False, log_level="critical", proxy_headers=True, forwarded_allow_ips="127.0.0.1")
 
 if __name__ == "__main__": main()

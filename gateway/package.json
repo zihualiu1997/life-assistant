@@ -4,6 +4,7 @@
   "private": true,
   "dependencies": {
     "openclaw": "2026.9.5",
-    "@tencent-weixin/openclaw-weixin": "2.4.9"
+    "@tencent-weixin/openclaw-weixin": "2.4.9",
+    "silk-wasm": "3.7.1"
   }
 }

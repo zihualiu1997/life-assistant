@@ -77,7 +77,7 @@ def valid_date(value):
     return result
 
 
-def journal(root, date, source, message_id, body, timezone=None):
+def journal(root, date, source, message_id, body, timezone=None, context=None):
     valid_date(date)
     if source not in {"codex", "wechat", "manual", "desktop"} or not message_id.strip() or not body.strip():
         raise ValueError("来源、消息编号和原文不能为空或无效")
@@ -103,6 +103,10 @@ def journal(root, date, source, message_id, body, timezone=None):
         quoted = "\n".join("> " + line for line in body.splitlines())
         metadata = marker + ("\n" + request_marker if source in {"desktop", "wechat", "manual"} else "")
         entry = f"\n\n{metadata}\n## 随手记录 · {stamp}\n\n- 来源：{source}\n- 发生日期：{date}\n\n### 用户原文\n\n{quoted}\n"
+        if context:
+            allowed = {"消息时间", "消息编号", "记录机制", "原始附件", "附件限制", "归档附件"}
+            if set(context) - allowed: raise ValueError("invalid_journal_context")
+            entry += "\n### 来源元数据（系统记录）\n\n" + "\n".join("> " + str(key) + "：" + str(value).replace("\n", "\n> ") for key, value in context.items()) + "\n"
         atomic_write(path, old.rstrip() + entry)
     return {"status": "recorded", "path": str(path)}
 

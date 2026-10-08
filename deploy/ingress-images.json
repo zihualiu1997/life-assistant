@@ -1,0 +1,9 @@
+{
+  "verified_date": "2026-10-07",
+  "caddy_version": "2.11.7",
+  "caddy_image": "caddy@sha256:f2a1290d0463aad60660d4ec134943f183ee2a5f6c3eb7bf32dd984f2f020772",
+  "tunnel_version": "2026.10.0",
+  "tunnel_image": "cloudflare/cloudflared@sha256:9b49eed8f62806d5d45ddf59ecefb5710429598ea6d3fcccd2af938f621b2b07",
+  "local_ingress_verified": true,
+  "public_network_verified": false
+}

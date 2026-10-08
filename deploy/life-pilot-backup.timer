@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily pilot backups at low traffic time
+
+[Timer]
+OnCalendar=*-*-* 04:15:00 Asia/Shanghai
+RandomizedDelaySec=15m
+Persistent=true
+Unit=life-pilot-backup.service
+
+[Install]
+WantedBy=timers.target

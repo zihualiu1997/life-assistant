@@ -8,7 +8,7 @@ import tomllib
 from privacy_scan import inspect
 
 ROOT = Path(__file__).resolve().parents[1]
-ENTRIES = ('server', 'openclaw-bridge', 'gateway', 'scripts', 'docs', 'install.sh',
+ENTRIES = ('server', 'openclaw-bridge', 'proactive-bridge', 'wechat-batching', 'gateway', 'scripts', 'tests', 'docs', 'deploy', '.dockerignore', 'install.sh',
            'pyproject.toml', 'requirements.lock', 'README.md', 'LICENSE',
            'THIRD_PARTY_NOTICES.md', '.gitattributes')
 

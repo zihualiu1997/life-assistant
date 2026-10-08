@@ -11,6 +11,11 @@ from .core import ServiceError, delivery_state, in_window, inside, lock, read_js
 def check_mail(c, kind):
     if not c["approved"][kind]:
         raise ServiceError("content_not_approved")
+    from life_app import managed
+    if managed.enabled():
+        from life_app.store import Store
+        if not Store(c["root"]).get("email_verified"): raise ServiceError("mail_connection_not_verified")
+        return
     m = c["mail"]
     if any(not m.get(k) for k in ("host", "username", "sender", "recipient")) or m.get("tls") not in ("ssl", "starttls"):
         raise ServiceError("mail_not_configured")
@@ -66,6 +71,18 @@ def send(c, kind, run_day, target, clock):
     body = report_path(c, kind, target).read_text(encoding="utf-8")
     if not body.strip():
         raise ServiceError("empty_report")
+    from life_app import managed
+    if managed.enabled():
+        path = receipt_path(c, kind, target)
+        state = {"date": target.isoformat(), "status": "sending", "sha256": hashlib.sha256(body.encode()).hexdigest()}
+        write_json(path, state)
+        try:
+            result = managed.call("mail/submit", {"kind": kind, "day": target.isoformat(), "subject": f"生活助手｜{target.isoformat()}", "body": body})
+            accepted = result.get("status") == "smtp_accepted"
+            state.update(status="sent" if accepted else "unknown", relay_id=result.get("id"))
+        except Exception: state["status"] = "unknown"
+        write_json(path, state)
+        return "sent" if state["status"] == "sent" else "needs_review"
     secret(c, c["mail"]["secret"])  # Fail before the ambiguous SMTP phase.
     key = hashlib.sha256((c["mail"]["recipient"] + ("evening-" if kind == "evening" else "") + target.isoformat()).encode()).hexdigest()
     state = {"date": target.isoformat(), "status": "sending", "sha256": hashlib.sha256(body.encode()).hexdigest(), "message_id": f"<life-{key}@{c['mail']['sender'].split('@')[-1]}>"}
@@ -90,6 +107,13 @@ def send(c, kind, run_day, target, clock):
 
 def test_connection(c):
     """Explicit CLI command only; contains no personal life context."""
+    from life_app import managed
+    if managed.enabled():
+        from life_app.store import Store
+        if not Store(c["root"]).get("email_verified"): raise ServiceError("mail_connection_not_verified")
+        result = managed.call("mail/submit", {"kind": "test", "day": dt.datetime.now(c["tz"]).date().isoformat(), "subject": "生活助手连接测试", "body": "生活助手连接测试；不含生活资料。"})
+        if result.get("status") != "smtp_accepted": raise ServiceError("connection_test_unknown_check_inbox")
+        return {"status": "accepted"}
     with lock(c["root"], "mail"):
         try:
             smtp_send(c, "生活助手连接测试；不含生活资料。", "生活助手连接测试", "connection-" + dt.datetime.now().strftime("%Y%m%d%H%M%S"))

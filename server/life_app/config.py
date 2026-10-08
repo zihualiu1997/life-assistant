@@ -11,9 +11,9 @@ class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     display_name: str = Field(default="生活助手用户", min_length=1, max_length=60)
     timezone: str = "Asia/Shanghai"
-    provider: str = "qwen"
-    base_url: str = PROVIDERS["qwen"]
-    model: str = Field(default="", max_length=100)
+    provider: str = "deepseek"
+    base_url: str = PROVIDERS["deepseek"]
+    model: str = Field(default="deepseek-flash", max_length=100)
     city: str = Field(default="", max_length=100)
     latitude: float = Field(default=0, ge=-90, le=90)
     longitude: float = Field(default=0, ge=-180, le=180)
@@ -91,6 +91,11 @@ def service_config(store):
     minutes = int(s.morning[:2]) * 60 + int(s.morning[3:]) + 150
     c["schedule"]["morning"][1] = "24:00" if minutes >= 1440 else f"{minutes//60:02}:{minutes%60:02}"
     path = store.state / "service.json"
+    from . import managed
+    if managed.enabled():
+        operator = managed.connection()
+        c["model"]["name"] = operator["model"]
+        c["mail"]["recipient"] = store.get("verified_email", "")
     atomic_write(path, json.dumps(c, ensure_ascii=False, indent=2))
     from life_service.core import load_config
     return load_config(path)

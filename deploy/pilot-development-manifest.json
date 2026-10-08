@@ -1,0 +1,12 @@
+{
+  "version": "0.2.0a1",
+  "image": "life-pilot@sha256:7c232ff239a66b64ecc514e46366bc075c9e10b9ae756bebe4131c6aeeab6953",
+  "data_format": 1,
+  "broker_api_version": 1,
+  "compatible_from": [
+    1
+  ],
+  "distribution": "local-development-only",
+  "real_account_acceptance": false,
+  "default_model": "deepseek-flash"
+}

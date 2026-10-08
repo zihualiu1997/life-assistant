@@ -2,6 +2,7 @@ import json
 import re
 import urllib.error
 import urllib.request
+import urllib.parse
 from pathlib import Path
 
 from .core import ServiceError, endpoint, secret
@@ -58,16 +59,30 @@ def validate(body, kind, context):
 
 
 def generate(c, kind, context):
+    return validate(complete(c, messages(kind, context)), kind, context)
+
+
+def complete(c, conversation, timeout=None):
     if not c["approved"]["model_context"]:
         raise ServiceError("model_context_not_approved")
+    from life_app import managed
+    if managed.enabled():
+        data = managed.call("chat/completions", {"messages": conversation, "model": managed.connection()["model"], "stream": False}, "proactive" if timeout else "briefing")
+        try:
+            choice = data["choices"][0]
+            if choice.get("finish_reason") != "stop" or not isinstance(choice["message"]["content"], str): raise ValueError()
+            return choice["message"]["content"]
+        except (ValueError, KeyError, IndexError, TypeError): raise ServiceError("invalid_model_response", True) from None
     url = endpoint(c)
     key = secret(c, c["model"]["secret"])
-    payload = {"model": c["model"]["name"], "messages": messages(kind, context), "stream": False}
-    if "enable_thinking" in c["model"]:
+    payload = {"model": c["model"]["name"], "messages": conversation, "stream": False}
+    if urllib.parse.urlsplit(c["model"]["base_url"]).hostname == "api.deepseek.com":
+        payload["thinking"] = {"type": "disabled"}
+    elif "enable_thinking" in c["model"]:
         payload["enable_thinking"] = c["model"]["enable_thinking"]
     request = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
     try:
-        with urllib.request.build_opener(NoRedirect()).open(request, timeout=c["model"]["timeout"]) as response:
+        with urllib.request.build_opener(NoRedirect()).open(request, timeout=timeout or c["model"]["timeout"]) as response:
             raw = response.read(262145)
             if len(raw) > 262144:
                 raise ServiceError("model_response_too_large")
@@ -75,7 +90,9 @@ def generate(c, kind, context):
         choice = data["choices"][0]
         if choice.get("finish_reason") != "stop":
             raise ServiceError("model_incomplete_output", True)
-        return validate(choice["message"]["content"], kind, context)
+        body = choice["message"]["content"]
+        if not isinstance(body, str) or not body.strip(): raise ServiceError("invalid_model_response", True)
+        return body
     except urllib.error.HTTPError as exc:
         raise ServiceError("model_http_" + str(exc.code), exc.code in (408, 429, 500, 502, 503, 504)) from None
     except (urllib.error.URLError, TimeoutError, OSError):

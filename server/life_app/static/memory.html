@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>记忆与隐私 · 生活助手</title><link rel="stylesheet" href="/static/style.css"><script src="/static/memory.js" defer></script></head>
+<body><aside><a class="brand" href="/">生活助手</a><p>个人记忆与隐私设置</p><a href="/">返回设置</a></aside><main>
+<h1>由你决定，哪些事情留下来。</h1><p id="message" role="status"></p>
+<p>普通对话记录和长期记忆分别保存。“只聊不记”不会进入自动整理。暂停或撤回记忆不会删除原始对话；已发送给云端的内容无法通过这里撤回。</p>
+<form id="preferences"><fieldset><legend>处理与联系偏好</legend>
+<label>怎么称呼你<input name="display_name" maxlength="80" required></label><label>晨报时间<input name="morning" type="time" required></label><label>晚报时间<input name="evening" type="time" required></label>
+<label class="check"><input name="cloud_processing" type="checkbox">允许云端模型处理我的对话和选定资料</label>
+<label class="check"><input name="automatic_memory" type="checkbox">允许自动整理明确表达的事实</label>
+<label class="check"><input name="proactive_contact" type="checkbox">允许主动关心和事件追问</label>
+<p>默认联系窗口：10:00—10:30、11:00—11:30、13:15—13:45、17:30—18:00、20:45—21:15、22:30—23:00。使用你的时区，并受安静时段和频率限制；不保证准点发送。</p>
+<label class="check"><input name="paused" type="checkbox">暂停后台整理和主动联系</label>
+<label>时区<input name="timezone" required></label><label>安静时段开始<input name="quiet_start" type="time" required></label><label>安静时段结束<input name="quiet_end" type="time" required></label>
+<label>每天最多主动联系次数<input name="daily_cap" type="number" min="0" max="6" required></label><label>每周最多主动联系次数<input name="weekly_cap" type="number" min="0" max="42" required></label>
+<button>保存偏好</button></fieldset></form>
+<h2>已保存的记忆</h2><p>纠正会保留原始来源，之后检索使用新内容。撤回后不再召回；图片判断和语音转写需要确认。</p><div id="memories"></div>
+</main></body></html>

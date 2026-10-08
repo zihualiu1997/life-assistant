@@ -1,0 +1,17 @@
+[Unit]
+Description=Five-person Life Assistant pilot
+After=docker.service network-online.target
+Requires=docker.service
+ConditionPathExists=!/var/lib/life-pilot/PAUSED
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/var/lib/life-pilot
+ExecStart=/usr/bin/docker compose -f /var/lib/life-pilot/compose.json --profile pilot up -d
+ExecStop=/usr/bin/docker compose -f /var/lib/life-pilot/compose.json --profile pilot stop --timeout 120
+TimeoutStartSec=600
+TimeoutStopSec=180
+
+[Install]
+WantedBy=multi-user.target

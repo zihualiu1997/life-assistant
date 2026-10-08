@@ -1,0 +1,10 @@
+[Unit]
+Description=Encrypted backups of pilot instances and operator state
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+UMask=0077
+ExecStart=/opt/life-pilot/venv/bin/life-fleet --root /var/lib/life-pilot daily-backup
+TimeoutStartSec=4h
